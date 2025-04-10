@@ -1,0 +1,732 @@
+//@version=6
+indicator("Combined Indicators", overlay=false)
+
+//=====================================================================
+// Regression Channel Settings
+//=====================================================================
+// Inputs
+inputLength = input.int(100, "Channel Length", minval=1, maxval=5000, group="Regression Channel Settings")
+inputSource = input.source(close, "Source", group="Regression Channel Settings")
+
+// Channel Deviation
+groupChannel = "Channel Settings"
+inputUseUpperDev = input.bool(true, "Upper Deviation", inline="Upper Deviation", group=groupChannel)
+inputUpperMult = input.float(2.0, "", inline="Upper Deviation", group=groupChannel)
+inputUseLowerDev = input.bool(true, "Lower Deviation", inline="Lower Deviation", group=groupChannel)
+inputLowerMult = input.float(2.0, "", inline="Lower Deviation", group=groupChannel)
+
+// Display Settings
+groupDisplay = "Display Settings"
+inputShowPearson = input.bool(true, "Show Pearson's R", group=groupDisplay)
+inputExtendLeft = input.bool(false, "Extend Lines Left", group=groupDisplay)
+inputExtendRight = input.bool(true, "Extend Lines Right", group=groupDisplay)
+extendStyle = switch
+    inputExtendLeft and inputExtendRight => extend.both
+    inputExtendLeft => extend.left
+    inputExtendRight => extend.right
+    => extend.none
+
+// Color Settings
+groupColors = "Color Settings"
+inputColorUpper = input.color(color.new(color.blue, 85), "Upper Color", inline=groupColors, group=groupColors)
+inputColorLower = input.color(color.new(color.red, 85), "Lower Color", inline=groupColors, group=groupColors)
+
+//=====================================================================
+// Regression Channel Calculations
+//=====================================================================
+calcSlope(source, length) =>
+    max_bars_back(source, 5000)
+    if not barstate.islast or length <= 1
+        [float(na), float(na), float(na)]
+    else
+        sumX = 0.0, sumY = 0.0, sumXSqr = 0.0, sumXY = 0.0
+        for i = 0 to length - 1 by 1
+            val = source[i]
+            per = i + 1.0
+            sumX += per
+            sumY += val
+            sumXSqr += per * per
+            sumXY += val * per
+        slope = (length * sumXY - sumX * sumY) / (length * sumXSqr - sumX * sumX)
+        average = sumY / length
+        intercept = average - slope * sumX / length + slope
+        [slope, average, intercept]
+
+[s, a, i] = calcSlope(inputSource, inputLength)
+startPrice = i + s * (inputLength - 1)
+endPrice = i
+
+//=====================================================================
+// Regression Channel Drawing
+//=====================================================================
+var line baseLine = na
+if na(baseLine) and not na(startPrice)
+    baseLine := line.new(bar_index - inputLength + 1, startPrice, bar_index, endPrice, width=1, extend=extendStyle, color=color.new(inputColorLower, 0), force_overlay = true)
+else
+    line.set_xy1(baseLine, bar_index - inputLength + 1, startPrice)
+    line.set_xy2(baseLine, bar_index, endPrice)
+    na
+
+calcDev(source, length, slope, average, intercept) =>
+    upDev = 0.0, dnDev = 0.0, stdDevAcc = 0.0
+    dsxx = 0.0, dsyy = 0.0, dsxy = 0.0
+    periods = length - 1
+    daY = intercept + slope * periods / 2
+    val = intercept
+    for j = 0 to periods by 1
+        price = high[j] - val
+        upDev := math.max(upDev, price)
+        price := val - low[j]
+        dnDev := math.max(dnDev, price)
+        price := source[j]
+        dxt = price - average
+        dyt = val - daY
+        stdDevAcc += (price - val) * (price - val)
+        dsxx += dxt * dxt
+        dsyy += dyt * dyt
+        dsxy += dxt * dyt
+        val += slope
+    stdDev = math.sqrt(stdDevAcc / (periods == 0 ? 1 : periods))
+    pearsonR = dsxx == 0 or dsyy == 0 ? 0 : dsxy / math.sqrt(dsxx * dsyy)
+    [stdDev, pearsonR, upDev, dnDev]
+
+[stdDev, pearsonR, upDev, dnDev] = calcDev(inputSource, inputLength, s, a, i)
+
+//=====================================================================
+// Deviation Channels
+//=====================================================================
+upperStartPrice = startPrice + (inputUseUpperDev ? inputUpperMult * stdDev : upDev)
+upperEndPrice = endPrice + (inputUseUpperDev ? inputUpperMult * stdDev : upDev)
+var line upper = na
+lowerStartPrice = startPrice + (inputUseLowerDev ? -inputLowerMult * stdDev : -dnDev)
+lowerEndPrice = endPrice + (inputUseLowerDev ? -inputLowerMult * stdDev : -dnDev)
+var line lower = na
+
+if na(upper) and not na(upperStartPrice)
+    upper := line.new(bar_index - inputLength + 1, upperStartPrice, bar_index, upperEndPrice, width=1, extend=extendStyle, color=color.new(inputColorUpper, 0), force_overlay = true)
+else
+    line.set_xy1(upper, bar_index - inputLength + 1, upperStartPrice)
+    line.set_xy2(upper, bar_index, upperEndPrice)
+    na
+
+if na(lower) and not na(lowerStartPrice)
+    lower := line.new(bar_index - inputLength + 1, lowerStartPrice, bar_index, lowerEndPrice, width=1, extend=extendStyle, color=color.new(inputColorUpper, 0), force_overlay = true)
+else
+    line.set_xy1(lower, bar_index - inputLength + 1, lowerStartPrice)
+    line.set_xy2(lower, bar_index, lowerEndPrice)
+    na
+
+linefill.new(upper, baseLine, color=inputColorUpper)
+linefill.new(baseLine, lower, color=inputColorLower)
+
+//=====================================================================
+// Alerts and Labels
+//=====================================================================
+float trend = math.sign(startPrice - endPrice)
+alertcondition(inputSource > line.get_price(upper, bar_index) or inputSource < line.get_price(lower, bar_index), 'Regression Channel Exited', "Price exited channel bounds")
+alertcondition(trend[1] >= 0 and trend < 0, 'Switched to Uptrend', 'Trend switched to Uptrend')
+alertcondition(trend[1] <= 0 and trend > 0, 'Switched to Downtrend', 'Trend switched to Downtrend')
+
+var label r = na
+label.delete(r[1])
+if inputShowPearson and not na(pearsonR)
+    r := label.new(bar_index - inputLength + 1, lowerStartPrice, str.tostring(pearsonR, "#.################"), color=color.new(color.white, 100), textcolor=color.new(inputColorUpper, 0), size=size.normal, style=label.style_label_up, force_overlay = true)
+
+//=====================================================================
+// RSI Fibonacci Levels
+//=====================================================================
+lenRSI = input.int(14, minval = 1, title = 'RSI Periods', group="RSI Settings")
+f1 = input.string(title = 'Fibonacci Level', defval = '38.2', options = ['23', '38.2', '50', '61.8', '78'], group="RSI Settings")
+
+// === BACKTEST RANGE ===
+FromYear = input.int(defval = 2010, title = 'From Year', minval = 2010, group="RSI Settings")
+FromMonth = input.int(defval = 1, title = 'From Month', minval = 1, group="RSI Settings")
+
+ToYear = input.int(defval = 2050, title = 'To Year', minval = 2050, group="RSI Settings")
+ToMonth = input.int(defval = 1, title = 'To Month', minval = 1, group="RSI Settings")
+
+srcRSI = hl2
+fiRSI = f1 == '38.2' ? 38.2 : f1 == '50' ? 50 : 61.8
+
+upRSI = ta.rma(math.max(ta.change(srcRSI), 0), lenRSI)
+downRSI = ta.rma(-math.min(ta.change(srcRSI), 0), lenRSI)
+rsi = downRSI == 0 ? 100 : upRSI == 0 ? 0 : 100 - 100 / (1 + upRSI / downRSI)
+
+// Plotting the RSI
+rcolor = rsi >= fiRSI ? color.lime : color.red
+plot(rsi, title = 'RSI', color = rcolor, linewidth = 2, force_overlay = false)
+
+// Fibonacci Levels for RSI
+band1 = hline(78.6, color = color.red, linestyle = hline.style_solid, editable = false)
+band0 = hline(23.6, color = color.lime, linestyle = hline.style_solid, editable = false)
+band2 = hline(61.8, color = color.gray, editable = false)
+band3 = hline(50, color = color.black, editable = false)
+band4 = hline(38.2, color = color.gray, editable = false)
+band5 = hline(fiRSI, color = color.blue, linestyle = hline.style_solid, editable = false)
+
+//=====================================================================
+// Auto Fibonacci Pivot Settings
+//=====================================================================
+Year_SR = timeframe.isdaily or timeframe.isintraday
+Month_SR = timeframe.period == '3' or timeframe.period == '5' or timeframe.period == '10' or timeframe.period == '15' or timeframe.period == '26' or timeframe.period == '30' or timeframe.period == '60' or timeframe.period == '120'
+Week_SR = timeframe.period == '1' or timeframe.period == '3' or timeframe.period == '5' or timeframe.period == '10' or timeframe.period == '15'
+
+
+//Time Setting for Label Placements
+Monthly_SR = timeframe.period == '180' or timeframe.period == '240' or timeframe.period == '300' or timeframe.isdaily
+Weekly_SR = timeframe.period == '26' or timeframe.period == '30' or timeframe.period == '60'
+Daily_SR = timeframe.period == '1' or timeframe.period == '3' or timeframe.period == '5' or timeframe.period == '10' or timeframe.period == '15'
+
+changePeriod = Daily_SR ? math.abs(time('D') - time_close('D')) / 3 : Weekly_SR ? math.abs(time('W') - time_close('W')) / 3 : Monthly_SR ? math.abs(time('M') - time_close('M')) / 3 : na
+
+start = Daily_SR ? time('D') + changePeriod : Weekly_SR ? time('W') + changePeriod : Monthly_SR ? time('M') + changePeriod : na
+groupPivot = "Pivot Fibonacci Settings"
+//Colors for S/R Lines
+yearColor = input(title = 'Year Line Color', defval = color.black, group=groupPivot)
+monthColor = input(title = 'Month Line Color', defval = color.black, group=groupPivot)
+weekColor = input(title = 'Resistance Line Color', defval = color.black, group=groupPivot)
+
+//Style line
+
+// STEP 1. Make the input with pull-down menu
+styleOption = input.string(title = 'Line Style', options = ['dashed (╌)', 'solid (─)'], defval = 'solid (─)')
+
+// STEP 2. Convert the input to a proper line style value
+lineStyle = styleOption == 'solid (─)' ? line.style_solid : styleOption == 'dashed (╌)' ? line.style_dashed : line.style_solid
+
+/////////////////////
+// Get HLC for Yearly Pivots//
+[yphigh, yplow, ypclose] = request.security(syminfo.tickerid, '12M', [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+//Yearly Pivot Points
+ypivot = (yphigh + yplow + ypclose) / 3
+yr7 = ypivot + (yphigh - yplow) * 2.000
+yr6 = ypivot + (yphigh - yplow) * 1.618
+yr5 = ypivot + (yphigh - yplow) * 1.414
+yr4 = ypivot + (yphigh - yplow) * 1.272
+yr3 = ypivot + (yphigh - yplow) * 1.000
+yrc = ypivot + (yphigh - yplow) * 0.764
+yr2 = ypivot + (yphigh - yplow) * 0.618
+yrb = ypivot + (yphigh - yplow) * 0.500
+yr1 = ypivot + (yphigh - yplow) * 0.382
+yra = ypivot + (yphigh - yplow) * 0.236
+ysa = ypivot - (yphigh - yplow) * 0.236
+ys1 = ypivot - (yphigh - yplow) * 0.382
+ysb = ypivot - (yphigh - yplow) * 0.500
+ys2 = ypivot - (yphigh - yplow) * 0.618
+ysc = ypivot - (yphigh - yplow) * 0.764
+ys3 = ypivot - (yphigh - yplow) * 1.000
+ys4 = ypivot - (yphigh - yplow) * 1.272
+ys5 = ypivot - (yphigh - yplow) * 1.414
+ys6 = ypivot - (yphigh - yplow) * 1.618
+ys7 = ypivot - (yphigh - yplow) * 2.000
+
+// Get HLC for Monthly Pivots//
+[mphigh, mplow, mpclose] = request.security(syminfo.tickerid, 'M', [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+//Monthly Pivot Points
+mpivot = (mphigh + mplow + mpclose) / 3
+mr7 = mpivot + (mphigh - mplow) * 2.000
+mr6 = mpivot + (mphigh - mplow) * 1.618
+mr5 = mpivot + (mphigh - mplow) * 1.414
+mr4 = mpivot + (mphigh - mplow) * 1.272
+mr3 = mpivot + (mphigh - mplow) * 1.000
+mrc = mpivot + (mphigh - mplow) * 0.764
+mr2 = mpivot + (mphigh - mplow) * 0.618
+mrb = mpivot + (mphigh - mplow) * 0.500
+mr1 = mpivot + (mphigh - mplow) * 0.382
+mra = mpivot + (mphigh - mplow) * 0.236
+msa = mpivot - (mphigh - mplow) * 0.236
+ms1 = mpivot - (mphigh - mplow) * 0.382
+msb = mpivot - (mphigh - mplow) * 0.500
+ms2 = mpivot - (mphigh - mplow) * 0.618
+msc = mpivot - (mphigh - mplow) * 0.764
+ms3 = mpivot - (mphigh - mplow) * 1.000
+ms4 = mpivot - (mphigh - mplow) * 1.272
+ms5 = mpivot - (mphigh - mplow) * 1.414
+ms6 = mpivot - (mphigh - mplow) * 1.618
+ms7 = mpivot - (mphigh - mplow) * 2.000
+
+// Get HLC for Weekly Pivots//
+[wphigh, wplow, wpclose] = request.security(syminfo.tickerid, 'W', [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+//Weekly Pivot Points
+wpivot = (wphigh + wplow + wpclose) / 3
+wr7 = wpivot + (wphigh - wplow) * 2.000
+wr6 = wpivot + (wphigh - wplow) * 1.618
+wr5 = wpivot + (wphigh - wplow) * 1.414
+wr4 = wpivot + (wphigh - wplow) * 1.272
+wr3 = wpivot + (wphigh - wplow) * 1.000
+wrc = wpivot + (wphigh - wplow) * 0.764
+wr2 = wpivot + (wphigh - wplow) * 0.618
+wrb = wpivot + (wphigh - wplow) * 0.500
+wr1 = wpivot + (wphigh - wplow) * 0.382
+wra = wpivot + (wphigh - wplow) * 0.236
+wsa = wpivot - (wphigh - wplow) * 0.236
+ws1 = wpivot - (wphigh - wplow) * 0.382
+wsb = wpivot - (wphigh - wplow) * 0.500
+ws2 = wpivot - (wphigh - wplow) * 0.618
+wsc = wpivot - (wphigh - wplow) * 0.764
+ws3 = wpivot - (wphigh - wplow) * 1.000
+ws4 = wpivot - (wphigh - wplow) * 1.272
+ws5 = wpivot - (wphigh - wplow) * 1.414
+ws6 = wpivot - (wphigh - wplow) * 1.618
+ws7 = wpivot - (wphigh - wplow) * 2.000
+
+
+//Mid level pivots
+
+//PIVOT LEVEL CONDITIONS 
+closex = request.security(syminfo.tickerid, timeframe.period, close[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+//WEEK LEVEL CONFIGURATION
+
+// The notes are applicable to the other forumulas for the other time frames 
+// so I did not duplicate them further down
+
+//Week Bull Rules
+wcloseHigh10 = closex > wr6 and closex < wr7 //closex is above than wr6 and below wr7
+wcloseHigh9 = closex > wr5 and closex < wr6 //closex is above than wr5 and below wr6
+wcloseHigh8 = closex > wr4 and closex < wr5 //closex is above than wr4 and below wr5
+wcloseHigh7 = closex > wr3 and closex < wr4 //closex is above than wr3 and below wr4
+wcloseHigh6 = closex > wrc and closex < wr3 //closex is above than wrc and below wr3
+wcloseHigh5 = closex > wr2 and closex < wrc //closex is above than wr2 and below wrc
+wcloseHigh4 = closex > wrb and closex < wr2 //closex is above than wrb and below wr2
+wcloseHigh3 = closex > wr1 and closex < wrb //closex is above than wr1 and below wrb
+wcloseHigh2 = closex > wra and closex < wr1 //closex is above than wra and below wr1
+wcloseHigh1 = closex > wpivot and closex < wra //closex is above than wpivot and below wra
+
+//Week Bear Rules
+wcloseLow1 = closex > wsa and closex < wpivot //closex is above than wsa and below wpivot
+wcloseLow2 = closex > ws1 and closex < wsa //closex is above than ws1 and below wsa
+wcloseLow3 = closex > wsb and closex < ws1 //closex is above than wsb and below ws1
+wcloseLow4 = closex > ws2 and closex < wsb //closex is above than ws2 and below wsb
+wcloseLow5 = closex > wsc and closex < ws2 //closex is above than wsc and below ws2
+wcloseLow6 = closex > ws3 and closex < wsc //closex is above than ws3 and below wsc
+wcloseLow7 = closex > ws4 and closex < ws3 //closex is above than ws4 and below ws3
+wcloseLow8 = closex > ws5 and closex < ws4 //closex is above than ws5 and below ws4
+wcloseLow9 = closex > ws6 and closex < ws5 //closex is above than ws6 and below ws5
+wcloseLow10 = closex > ws7 and closex < ws6 //closex is above than ws7 and below ws6
+
+//WEEK PRICE LEVELS//
+
+//Week Resistance Price Levels
+var float weekResistanceLevel = na
+
+//output of resistance pivot level based on conditions above 
+weekResistanceLevel := wcloseHigh10 ? wr7 : wcloseHigh9 ? wr6 : wcloseHigh8 ? wr5 : wcloseHigh7 ? wr4 : wcloseHigh6 ? wr3 : wcloseHigh5 ? wrc : wcloseHigh4 ? wr2 : wcloseHigh3 ? wrb : wcloseHigh2 ? wr1 : wcloseHigh1 ? wra : wcloseLow1 ? wpivot : wcloseLow2 ? wsa : wcloseLow3 ? ws1 : wcloseLow4 ? wsb : wcloseLow5 ? ws2 : wcloseLow6 ? wsc : wcloseLow7 ? ws3 : wcloseLow8 ? ws4 : wcloseLow9 ? ws5 : wcloseLow10 ? ws6 : weekResistanceLevel
+
+//Week Support Price Levels
+var float weekSupportLevel = na
+
+//output of support pivot level based on conditions above 
+weekSupportLevel := wcloseHigh10 ? wr6 : wcloseHigh9 ? wr5 : wcloseHigh8 ? wr4 : wcloseHigh7 ? wr3 : wcloseHigh6 ? wrc : wcloseHigh5 ? wr2 : wcloseHigh4 ? wrb : wcloseHigh3 ? wr1 : wcloseHigh2 ? wra : wcloseHigh1 ? wpivot : wcloseLow1 ? wsa : wcloseLow2 ? ws1 : wcloseLow3 ? wsb : wcloseLow4 ? ws2 : wcloseLow5 ? wsc : wcloseLow6 ? ws3 : wcloseLow7 ? ws4 : wcloseLow8 ? ws5 : wcloseLow9 ? ws6 : wcloseLow10 ? ws7 : weekSupportLevel
+
+//WEEK LABEL PLOTS//
+
+//Week Resistance Labels
+var string weekResistanceLabel = na
+
+//corresponding labels for pivot levels
+weekResistanceLabel := wcloseHigh10 ? 'Week R7' : wcloseHigh9 ? 'Week R6' : wcloseHigh8 ? 'Week R5' : wcloseHigh7 ? 'Week R4' : wcloseHigh6 ? 'Week R3' : wcloseHigh5 ? 'Week R-C' : wcloseHigh4 ? 'Week R2' : wcloseHigh3 ? 'Week R-B' : wcloseHigh2 ? 'Week R1' : wcloseHigh1 ? 'Week R-A' : wcloseLow1 ? 'Week Pivot' : wcloseLow2 ? 'Week S-A' : wcloseLow3 ? 'Week S1' : wcloseLow4 ? 'Week S-B' : wcloseLow5 ? 'Week S2' : wcloseLow6 ? 'Week S-C' : wcloseLow7 ? 'Week S3' : wcloseLow8 ? 'Week S4' : wcloseLow9 ? 'Week S5' : wcloseLow10 ? 'Week S6' : weekResistanceLabel
+
+//Week Support Labels
+var string weekSupportLabel = na
+
+weekSupportLabel := wcloseHigh10 ? 'Week R6' : wcloseHigh9 ? 'Week R5' : wcloseHigh8 ? 'Week R4' : wcloseHigh7 ? 'Week R3' : wcloseHigh6 ? 'Week R-C' : wcloseHigh5 ? 'Week R2' : wcloseHigh4 ? 'Week R-C' : wcloseHigh3 ? 'Week R1' : wcloseHigh2 ? 'Week R-A' : wcloseHigh1 ? 'Week Pivot' : wcloseLow1 ? 'Week S-A' : wcloseLow2 ? 'Week S1' : wcloseLow3 ? 'Week S-B' : wcloseLow4 ? 'Week S2' : wcloseLow5 ? 'Week S-C' : wcloseLow6 ? 'Week S3' : wcloseLow7 ? 'Week S4' : wcloseLow8 ? 'Week S5' : wcloseLow9 ? 'Week S6' : wcloseLow10 ? 'Week S7' : weekSupportLabel
+
+//To remove the zero line level
+
+//Week S/R Line & Label Plots
+var line weekRLevel = na
+var line weekSLevel = na
+var label weekRLabel = na
+var label weekSLabel = na
+
+if Week_SR
+    weekRLevel := line.new(x1 = bar_index[1], y1 = weekResistanceLevel, x2 = bar_index, y2 = weekResistanceLevel, extend = extend.both, color = weekColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(weekRLevel[1])
+
+    weekSLevel := line.new(x1 = bar_index[1], y1 = weekSupportLevel, x2 = bar_index, y2 = weekSupportLevel, extend = extend.both, color = weekColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(weekSLevel[1])
+
+    //weekRLabel := label.new(x = start, y = weekResistanceLevel, text = weekResistanceLabel, xloc = xloc.bar_time, yloc = yloc.price, style = label.style_none, textcolor = color.white, force_overlay = true)
+    //label.delete(weekRLabel[1])
+
+    //weekSLabel := label.new(x = start, y = weekSupportLevel, text = weekSupportLabel, xloc = xloc.bar_time, yloc = yloc.price, style = label.style_none, textcolor = color.white, force_overlay = true)
+    ///label.delete(weekSLabel[1])
+
+//END OF WEEK CONFIGURATION//
+
+
+//MONTH LEVEL CONFIGURATION
+
+//Month Bull Rules
+mcloseHigh1 = closex > mpivot and closex < mra
+mcloseHigh2 = closex > mra and closex < mr1
+mcloseHigh3 = closex > mr1 and closex < mrb
+mcloseHigh4 = closex > mrb and closex < mr2
+mcloseHigh5 = closex > mr2 and closex < mrc
+mcloseHigh6 = closex > mrc and closex < mr3
+mcloseHigh7 = closex > mr3 and closex < mr4
+mcloseHigh8 = closex > mr4 and closex < mr5
+mcloseHigh9 = closex > mr5 and closex < mr6
+mcloseHigh10 = closex > mr6 and closex < mr7
+
+//Month Bear Rules
+mcloseLow1 = closex > msa and closex < mpivot
+mcloseLow2 = closex > ms1 and closex < msa
+mcloseLow3 = closex > msb and closex < ms1
+mcloseLow4 = closex > ms2 and closex < msb
+mcloseLow5 = closex > msc and closex < ms2
+mcloseLow6 = closex > ms3 and closex < msc
+mcloseLow7 = closex > ms4 and closex < ms3
+mcloseLow8 = closex > ms5 and closex < ms4
+mcloseLow9 = closex > ms6 and closex < ms5
+mcloseLow10 = closex > ms7 and closex < ms6
+
+//MONTH PRICE LEVELS//
+
+//Month Resistance Price Levels
+var float monthResistanceLevel = na
+
+monthResistanceLevel := mcloseHigh10 ? mr7 : mcloseHigh9 ? mr6 : mcloseHigh8 ? mr5 : mcloseHigh7 ? mr4 : mcloseHigh6 ? mr3 : mcloseHigh5 ? mrc : mcloseHigh4 ? mr2 : mcloseHigh3 ? mrb : mcloseHigh2 ? mr1 : mcloseHigh1 ? mra : mcloseLow1 ? mpivot : mcloseLow2 ? msa : mcloseLow3 ? ms1 : mcloseLow4 ? msb : mcloseLow5 ? ms2 : mcloseLow6 ? msc : mcloseLow7 ? ms3 : mcloseLow8 ? ms4 : mcloseLow9 ? ms5 : mcloseLow10 ? ms6 : monthResistanceLevel
+
+//Month Support Price Levels
+var float monthSupportLevel = na
+
+monthSupportLevel := mcloseHigh10 ? mr6 : mcloseHigh9 ? mr5 : mcloseHigh8 ? mr4 : mcloseHigh7 ? mr3 : mcloseHigh6 ? mrc : mcloseHigh5 ? mr2 : mcloseHigh4 ? mrb : mcloseHigh3 ? mr1 : mcloseHigh2 ? mra : mcloseHigh1 ? mpivot : mcloseLow1 ? msa : mcloseLow2 ? ms1 : mcloseLow3 ? msb : mcloseLow4 ? ms2 : mcloseLow5 ? msc : mcloseLow6 ? ms3 : mcloseLow7 ? ms4 : mcloseLow8 ? ms5 : mcloseLow9 ? ms6 : mcloseLow10 ? ms7 : monthSupportLevel
+
+//MONTH LABEL PLOTS//
+
+//Resistance Label Plots
+var string monthResistanceLabel = na
+
+//Bull Resistance Titles
+monthResistanceLabel := mcloseHigh10 ? 'Month R7' : mcloseHigh9 ? 'Month R6' : mcloseHigh8 ? 'Month R5' : mcloseHigh7 ? 'Month R4' : mcloseHigh6 ? 'Month R3' : mcloseHigh5 ? 'Month R-C' : mcloseHigh4 ? 'Month R2' : mcloseHigh3 ? 'Month R-B' : mcloseHigh2 ? 'Month R1' : mcloseHigh1 ? 'Month R-A' : monthResistanceLabel
+
+//Bear Resistance Titles
+monthResistanceLabel := mcloseLow1 ? 'Month Pivot' : mcloseLow2 ? 'Month S-A' : mcloseLow3 ? 'Month S1' : mcloseLow4 ? 'Month S-B' : mcloseLow5 ? 'Month S2' : mcloseLow6 ? 'Month S-C' : mcloseLow7 ? 'Month S3' : mcloseLow8 ? 'Month S4' : mcloseLow9 ? 'Month S5' : mcloseLow10 ? 'Month S6' : monthResistanceLabel
+
+//Support Label Plots
+var string monthSupportLabel = na
+
+//Bull Support Titles
+monthSupportLabel := mcloseHigh10 ? 'Month R6' : mcloseHigh9 ? 'Month R5' : mcloseHigh8 ? 'Month R4' : mcloseHigh7 ? 'Month R3' : mcloseHigh6 ? 'Month R-C' : mcloseHigh5 ? 'Month R2' : mcloseHigh4 ? 'Month R-B' : mcloseHigh3 ? 'Month R1' : mcloseHigh2 ? 'Month R-A' : mcloseHigh1 ? 'Month Pivot' : monthSupportLabel
+
+//Bear Support Titles
+monthSupportLabel := mcloseLow1 ? 'Month S-A' : mcloseLow2 ? 'Month S1' : mcloseLow3 ? 'Month S-B' : mcloseLow4 ? 'Month S2' : mcloseLow5 ? 'Month S-C' : mcloseLow6 ? 'Month S3' : mcloseLow7 ? 'Month S4' : mcloseLow8 ? 'Month S5' : mcloseLow9 ? 'Month S6' : mcloseLow10 ? 'Month S7' : monthSupportLabel
+
+//Month S/R Line & Label Plots
+var line monthRLevel = na
+var line monthSLevel = na
+var label monthRLabel = na
+var label monthSLabel = na
+
+if Month_SR
+    monthRLevel := line.new(x1 = bar_index[1], y1 = monthResistanceLevel, x2 = bar_index, y2 = monthResistanceLevel, extend = extend.both, color = monthColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(monthRLevel[1])
+
+    monthSLevel := line.new(x1 = bar_index[1], y1 = monthSupportLevel, x2 = bar_index, y2 = monthSupportLevel, extend = extend.both, color = monthColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(monthSLevel[1])
+
+    //monthRLabel := label.new(x = start, y = monthResistanceLevel, text = monthResistanceLabel, xloc = xloc.bar_time, yloc = yloc.price, style = label.style_none, textcolor = color.white, force_overlay = true)
+    //label.delete(monthRLabel[1])
+
+    //monthSLabel := label.new(x = start, y = monthSupportLevel, text = monthSupportLabel, xloc = xloc.bar_time, yloc = yloc.price, style = label.style_none, textcolor = color.white, force_overlay = true)
+    //label.delete(monthSLabel[1])
+
+//END OF MONTH CONFIGURATION//
+
+
+//YEAR LEVEL CONFIGURATION//
+
+//Year Bull Rules
+ycloseHigh1 = closex > ypivot and closex < yra
+ycloseHigh2 = closex > yra and closex < yr1
+ycloseHigh3 = closex > yr1 and closex < yrb
+ycloseHigh4 = closex > yrb and closex < yr2
+ycloseHigh5 = closex > yr2 and closex < yrc
+ycloseHigh6 = closex > yrc and closex < yr3
+ycloseHigh7 = closex > yr3 and closex < yr4
+ycloseHigh8 = closex > yr4 and closex < yr5
+ycloseHigh9 = closex > yr5 and closex < yr6
+ycloseHigh10 = closex > yr6 and closex < yr7
+
+//Year Bear Rules
+ycloseLow1 = closex > ysa and closex < ypivot
+ycloseLow2 = closex > ys1 and closex < ysa
+ycloseLow3 = closex > ysb and closex < ys1
+ycloseLow4 = closex > ys2 and closex < ysb
+ycloseLow5 = closex > ysc and closex < ys2
+ycloseLow6 = closex > ys3 and closex < ysc
+ycloseLow7 = closex > ys4 and closex < ys3
+ycloseLow8 = closex > ys5 and closex < ys4
+ycloseLow9 = closex > ys6 and closex < ys5
+ycloseLow10 = closex > ys7 and closex < ys6
+
+
+//YEAR PRICE LEVELS//
+
+//Year Resistance Price Levels
+var float yearResistanceLevel = na
+
+yearResistanceLevel := ycloseHigh10 ? yr7 : ycloseHigh9 ? yr6 : ycloseHigh8 ? yr5 : ycloseHigh7 ? yr4 : ycloseHigh6 ? yr3 : ycloseHigh5 ? yrc : ycloseHigh4 ? yr2 : ycloseHigh3 ? yrb : ycloseHigh2 ? yr1 : ycloseHigh1 ? yra : ycloseLow1 ? ypivot : ycloseLow2 ? ysa : ycloseLow3 ? ys1 : ycloseLow4 ? ysb : ycloseLow5 ? ys2 : ycloseLow6 ? ysc : ycloseLow7 ? ys3 : ycloseLow8 ? ys4 : ycloseLow9 ? ys5 : ycloseLow10 ? ys6 : yearResistanceLevel
+
+//Year Support Price Levels
+var float yearSupportLevel = na
+
+yearSupportLevel := ycloseHigh10 ? yr6 : ycloseHigh9 ? yr5 : ycloseHigh8 ? yr4 : ycloseHigh7 ? yr3 : ycloseHigh6 ? yrc : ycloseHigh5 ? yr2 : ycloseHigh4 ? yrb : ycloseHigh3 ? yr1 : ycloseHigh2 ? yra : ycloseHigh1 ? ypivot : ycloseLow1 ? ysa : ycloseLow2 ? ys1 : ycloseLow3 ? ysb : ycloseLow4 ? ys2 : ycloseLow5 ? ysc : ycloseLow6 ? ys3 : ycloseLow7 ? ys4 : ycloseLow8 ? ys5 : ycloseLow9 ? ys6 : ycloseLow10 ? ys7 : yearSupportLevel
+
+//YEAR LABEL PLOTS//
+
+//Year Resistance Labels
+var string yearResistanceLabel = na
+
+yearResistanceLabel := ycloseHigh10 ? 'Year R7' : ycloseHigh9 ? 'Year R6' : ycloseHigh8 ? 'Year R5' : ycloseHigh7 ? 'Year R4' : ycloseHigh6 ? 'Year R3' : ycloseHigh5 ? 'Year R-C' : ycloseHigh4 ? 'Year R2' : ycloseHigh3 ? 'Year R-B' : ycloseHigh2 ? 'Year R1' : ycloseHigh1 ? 'Year R-A' : ycloseLow1 ? 'Year Pivot' : ycloseLow2 ? 'Year S-A' : ycloseLow3 ? 'Year S1' : ycloseLow4 ? 'Year S-B' : ycloseLow5 ? 'Year S2' : ycloseLow6 ? 'Year S-C' : ycloseLow7 ? 'Year S3' : ycloseLow8 ? 'Year S4' : ycloseLow9 ? 'Year S5' : ycloseLow10 ? 'Year S6' : yearResistanceLabel
+
+//Year Support Labels
+var string yearSupportLabel = na
+
+yearSupportLabel := ycloseHigh10 ? 'Year R6' : ycloseHigh9 ? 'Year R5' : ycloseHigh8 ? 'Year R4' : ycloseHigh7 ? 'Year R3' : ycloseHigh6 ? 'Year R-C' : ycloseHigh5 ? 'Year R2' : ycloseHigh4 ? 'Year R-B' : ycloseHigh3 ? 'Year R1' : ycloseHigh2 ? 'Year R-A' : ycloseHigh1 ? 'Year Pivot' : ycloseLow1 ? 'Year S-A' : ycloseLow2 ? 'Year S1' : ycloseLow3 ? 'Year S-B' : ycloseLow4 ? 'Year S2' : ycloseLow5 ? 'Year S-C' : ycloseLow6 ? 'Year S3' : ycloseLow7 ? 'Year S4' : ycloseLow8 ? 'Year S5' : ycloseLow9 ? 'Year S6' : ycloseLow10 ? 'Year S7' : yearSupportLabel
+
+//Year S/R Line & Label Plots
+var line yearRLevel = na
+var line yearSLevel = na
+var label yearRLabel = na
+var label yearSLabel = na
+
+if Year_SR
+    yearRLevel := line.new(x1 = bar_index[1], y1 = yearResistanceLevel, x2 = bar_index, y2 = yearResistanceLevel, extend = extend.both, color = yearColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(yearRLevel[1])
+
+    yearSLevel := line.new(x1 = bar_index[1], y1 = yearSupportLevel, x2 = bar_index, y2 = yearSupportLevel, extend = extend.both, color = yearColor, style = lineStyle, width = 2, force_overlay = true)
+    line.delete(yearSLevel[1])
+
+    //yearRLabel := label.new(x = start, y = yearResistanceLevel, text = yearResistanceLabel, xloc = xloc.bar_time, yloc = yloc.price, style = label.style_none, textcolor = color.white, force_overlay = true)
+    //label.delete(yearRLabel[1])
+
+    //yearSLabel := label.new(x = start, y = yearSupportLevel, text = yearSupportLabel, xloc = xloc.bar_time, style = label.style_none, textcolor = color.white, force_overlay = true)
+    //label.delete(yearSLabel[1])
+
+//=====================================================================
+// Range Filter Settings
+//=====================================================================
+rangePeriodRF = input.int(100, "Range Period", minval=1, group="Range Filter" )
+rangeMultRF = input.float(3.0, "Range Multiplier", minval=0.1, group="Range Filter")
+rangeSourceRF = input.source(close, "Range Source", group="Range Filter")
+
+// Colors (Define if not already defined in your global script)
+upColor = input.color(color.lime, "Up Color", group="Range Filter")
+downColor = input.color(color.red, "Down Color", group="Range Filter")
+midColor = input.color(color.gray, "Neutral Color", group="Range Filter")
+
+// Smooth Average Range
+smoothrng_rf(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    ta.ema(avrng, wper) * m
+
+smrngRF = smoothrng_rf(rangeSourceRF, rangePeriodRF, rangeMultRF)
+
+// Range Filter Calculation
+rangefilt_rf(x, r) =>
+    result = x
+    result := x > nz(result[1]) ? (x - r < nz(result[1]) ? nz(result[1]) : x - r) : (x + r > nz(result[1]) ? nz(result[1]) : x + r)
+    result
+
+filtRF = rangefilt_rf(rangeSourceRF, smrngRF)
+
+// Filter Direction
+upwardRF = 0.0
+upwardRF := filtRF > filtRF[1] ? nz(upwardRF[1]) + 1 : filtRF < filtRF[1] ? 0 : nz(upwardRF[1])
+downwardRF = 0.0
+downwardRF := filtRF < filtRF[1] ? nz(downwardRF[1]) + 1 : filtRF > filtRF[1] ? 0 : nz(downwardRF[1])
+
+// Target Bands
+hbandRF = filtRF + smrngRF
+lbandRF = filtRF - smrngRF
+
+// Colors
+filtColorRF = upwardRF > 0 ? upColor : downwardRF > 0 ? downColor : midColor
+barColorRF = rangeSourceRF > filtRF and rangeSourceRF > rangeSourceRF[1] and upwardRF > 0 ? upColor :
+             rangeSourceRF > filtRF and rangeSourceRF < rangeSourceRF[1] and upwardRF > 0 ? upColor :
+             rangeSourceRF < filtRF and rangeSourceRF < rangeSourceRF[1] and downwardRF > 0 ? downColor :
+             rangeSourceRF < filtRF and rangeSourceRF > rangeSourceRF[1] and downwardRF > 0 ? downColor :
+             midColor
+
+// Plots
+filtPlotRF = plot(filtRF, color=filtColorRF, linewidth=2, force_overlay = true, title='Range Filter')
+hbandPlotRF = plot(hbandRF, color=color.new(upColor, 70),force_overlay = true, title='High Target')
+lbandPlotRF = plot(lbandRF, color=color.new(downColor, 70),force_overlay = true, title='Low Target')
+
+// Fills
+//fill(hbandPlotRF, filtPlotRF, color=color.new(upColor, 90), title='High Target Range')
+//fill(lbandPlotRF, filtPlotRF, color=color.new(downColor, 90), title='Low Target Range')
+
+// Bar Color
+//barcolor(barColorRF)
+
+// Break Outs
+longCondRF = rangeSourceRF > filtRF and rangeSourceRF > rangeSourceRF[1] and upwardRF > 0 or
+             rangeSourceRF > filtRF and rangeSourceRF < rangeSourceRF[1] and upwardRF > 0
+
+shortCondRF = rangeSourceRF < filtRF and rangeSourceRF < rangeSourceRF[1] and downwardRF > 0 or
+              rangeSourceRF < filtRF and rangeSourceRF > rangeSourceRF[1] and downwardRF > 0
+
+condIniRF = 0
+condIniRF := longCondRF ? 1 : shortCondRF ? -1 : condIniRF[1]
+
+longSignalRF = longCondRF and condIniRF[1] == -1
+shortSignalRF = shortCondRF and condIniRF[1] == 1
+
+// Alerts & Signals
+plotshape(longSignalRF, title='Buy Signal', text='Buy', textcolor=color.white, style=shape.labelup, size=size.small, location=location.belowbar, color=color.new(upColor, 20), force_overlay = true)
+plotshape(shortSignalRF, title='Sell Signal', text='Sell', textcolor=color.white, style=shape.labeldown, size=size.small, location=location.abovebar, color=color.new(downColor, 20), force_overlay = true)
+
+alertcondition(longSignalRF, title='Buy alert on Range Filter', message='Buy alert on Range Filter')
+alertcondition(shortSignalRF, title='Sell alert on Range Filter', message='Sell alert on Range Filter')
+alertcondition(longSignalRF or shortSignalRF, title='Buy and Sell alert on Range Filter', message='Buy and Sell alert on Range Filter')
+//=====================================================================
+// Ribbon Settings
+//=====================================================================
+inputRibbonLength     = input.int(10, "Ribbon Length", minval=1, group="Ribbon Fibonacci")
+inputRibbonSource     = input(close, "Ribbon Source",group="Ribbon Fibonacci")
+inputColorCandles     = input.bool(false, "Color Candles", group="Ribbon Fibonacci")
+inputRibbonOffset     = input.int(0, "Ribbon Offset", minval=-500, maxval=500, group="Ribbon Fibonacci")
+
+showSecondRibbon      = input.bool(false, '2nd Ribbon?', group="Ribbon Fibonacci")
+inputRibbonLength2    = input.int(21, minval = 1, title = '2nd Length', group="Ribbon Fibonacci")
+inputRibbonSource2    = input(close, title = '2nd Source', group="Ribbon Fibonacci")
+
+fma(source, length, backWeight) =>
+    fibSum = length * (length + 1) / 2
+    mean = 0.0
+    for i = 1 to length
+        weight = backWeight ? i : length - (i - 1)
+        mean += nz(source[i - 1]) * (weight / fibSum)
+    mean
+
+// First Ribbon
+out1_r1 = fma(inputRibbonSource, inputRibbonLength, false)
+out2_r1 = fma(inputRibbonSource, inputRibbonLength, true)
+span_r1 = math.abs(out1_r1 - out2_r1)
+spanGrow_r1 = span_r1 > span_r1[1]
+bullish_r1 = out1_r1 > out2_r1
+strengthCount_r1 = 0
+transparency_r1 = 0
+if bullish_r1
+    strengthCount_r1 := strengthCount_r1 + (close > out1_r1 ? 1 : 0) + (close > out2_r1 ? 1 : 0) + (spanGrow_r1 ? 1 : 0) + (out1_r1 > out1_r1[1] ? 1 : 0) + (out2_r1 > out2_r1[1] ? 1 : 0)
+    transparency_r1 := 90 - strengthCount_r1 * 15
+else
+    strengthCount_r1 := strengthCount_r1 + (close < out1_r1 ? 1 : 0) + (close < out2_r1 ? 1 : 0) + (spanGrow_r1 ? 1 : 0) + (out1_r1 < out1_r1[1] ? 1 : 0) + (out2_r1 < out2_r1[1] ? 1 : 0)
+    transparency_r1 := 90 - strengthCount_r1 * 15
+ribbonColor_r1 = bullish_r1 ? color.new(color.green, transparency_r1) : color.new(color.red, transparency_r1)
+candleColor_r1 = bullish_r1 ? color.new(color.green, transparency_r1 * 2 - 50) : color.new(color.red, transparency_r1 * 2 - 50)
+
+h1_r1 = plot(out1_r1, title = 'Ribbon1 EMA', color = ribbonColor_r1, offset = inputRibbonOffset, linewidth = 1, force_overlay = true)
+h2_r1 = plot(out2_r1, title = 'Ribbon1 WMA', color = ribbonColor_r1, offset = inputRibbonOffset, linewidth = 1, force_overlay = true)
+fill(h1_r1, h2_r1, color = ribbonColor_r1)
+barcolor(inputColorCandles ? candleColor_r1 : na)
+
+// Second Ribbon
+out1_r2 = fma(inputRibbonSource2, inputRibbonLength2, false)
+out2_r2 = fma(inputRibbonSource2, inputRibbonLength2, true)
+span_r2 = math.abs(out1_r2 - out2_r2)
+spanGrow_r2 = span_r2 > span_r2[1]
+bullish_r2 = out1_r2 > out2_r2
+strengthCount_r2 = 0
+transparency_r2 = 0
+if bullish_r2
+    strengthCount_r2 := strengthCount_r2 + (close > out1_r2 ? 1 : 0) + (close > out2_r2 ? 1 : 0) + (spanGrow_r2 ? 1 : 0) + (out1_r2 > out1_r2[1] ? 1 : 0) + (out2_r2 > out2_r2[1] ? 1 : 0)
+    transparency_r2 := 90 - strengthCount_r2 * 15
+else
+    strengthCount_r2 := strengthCount_r2 + (close < out1_r2 ? 1 : 0) + (close < out2_r2 ? 1 : 0) + (spanGrow_r2 ? 1 : 0) + (out1_r2 < out1_r2[1] ? 1 : 0) + (out2_r2 < out2_r2[1] ? 1 : 0)
+    transparency_r2 := 90 - strengthCount_r2 * 15
+ribbonColor_r2 = bullish_r2 ? color.new(color.green, transparency_r2) : color.new(color.red, transparency_r2)
+
+h1_r2 = plot(showSecondRibbon ? out1_r2 : na, title = 'Ribbon2 EMA', color = ribbonColor_r2, offset = inputRibbonOffset, linewidth = 1, force_overlay = true)
+h2_r2 = plot(showSecondRibbon ? out2_r2 : na, title = 'Ribbon2 WMA', color = ribbonColor_r2, offset = inputRibbonOffset, linewidth = 1, force_overlay = true)
+fill(h1_r2, h2_r2, color = showSecondRibbon ? ribbonColor_r2 : na)
+
+
+//=====================================================================
+// Trend Line Settings
+//=====================================================================
+inputTrendLength = input.int(14, "Swing Detection Lookback", group = "Trendlines")
+trends_mult = input.float(1.0, "Slope", minval=0, step=0.1, group = "Trendlines")
+calcMethod = input.string('Atr', "Slope Calculation", options=['Atr', 'Stdev', 'Linreg'], group = "Trendlines")
+backpaint = input(true, "Backpainting", group = "Trendlines")
+
+
+//Style
+upCss = input.color(color.teal, 'Up Trendline Color', group = "Trendlines")
+dnCss = input.color(color.red, 'Down Trendline Color', group = "Trendlines")
+showExt = input(true, 'Show Extended Lines', group = "Trendlines")
+
+//-----------------------------------------------------------------------------}
+//Calculations
+//-----------------------------------------------------------------------------{
+var trends_upper = 0.
+var trends_lower = 0.
+var slope_ph = 0.
+var slope_pl = 0.
+
+var trends_offset = backpaint ? inputTrendLength : 0
+
+n = bar_index
+trends_src = close
+
+ph = ta.pivothigh(inputTrendLength, inputTrendLength)
+pl = ta.pivotlow(inputTrendLength, inputTrendLength)
+
+//Slope Calculation Method
+slope = switch calcMethod
+    'Atr' => ta.atr(inputTrendLength) / inputTrendLength * trends_mult
+    'Stdev' => ta.stdev(trends_src, inputTrendLength) / inputTrendLength * trends_mult
+    'Linreg' => math.abs(ta.sma(trends_src * n, inputTrendLength) - ta.sma(trends_src, inputTrendLength) * ta.sma(n, inputTrendLength)) / ta.variance(n, inputTrendLength) / 2 * trends_mult
+
+//Get slopes and calculate trendlines
+slope_ph := bool(ph) ? slope : slope_ph
+slope_pl := bool(pl) ? slope : slope_pl
+
+trends_upper := bool(ph) ? ph : trends_upper - slope_ph
+trends_lower := bool(pl) ? pl : trends_lower + slope_pl
+
+var upos = 0
+var dnos = 0
+upos := bool(ph) ? 0 : close > trends_upper - slope_ph * inputTrendLength ? 1 : upos
+dnos := bool(pl) ? 0 : close < trends_lower + slope_pl * inputTrendLength ? 1 : dnos
+
+//-----------------------------------------------------------------------------}
+//Extended Lines
+//-----------------------------------------------------------------------------{
+var uptl = line.new(na, na, na, na, color = upCss, style = line.style_dashed, extend = extend.right, force_overlay = true)
+var dntl = line.new(na, na, na, na, color = dnCss, style = line.style_dashed, extend = extend.right, force_overlay = true)
+
+if bool(ph) and showExt
+    uptl.set_xy1(n - trends_offset, backpaint ? ph : trends_upper - slope_ph * inputTrendLength)
+    uptl.set_xy2(n - trends_offset + 1, backpaint ? ph - slope : trends_upper - slope_ph * (inputTrendLength + 1))
+
+if bool(pl) and showExt
+    dntl.set_xy1(n - trends_offset, backpaint ? pl : trends_lower + slope_pl * inputTrendLength)
+    dntl.set_xy2(n - trends_offset + 1, backpaint ? pl + slope : trends_lower + slope_pl * (inputTrendLength + 1))
+
+//-----------------------------------------------------------------------------}
+//Plots
+//-----------------------------------------------------------------------------{
+plot(backpaint ? trends_upper : trends_upper - slope_ph * inputTrendLength, 'Upper', color = bool(ph) ? na : upCss, offset = -trends_offset, force_overlay = true)
+plot(backpaint ? trends_lower : trends_lower + slope_pl * inputTrendLength, 'Lower', color = bool(pl) ? na : dnCss, offset = -trends_offset, force_overlay = true)
+
+//Breakouts
+plotshape(upos > upos[1] ? low : na, 'Upper Break', shape.labelup, location.absolute, upCss, text = 'B', textcolor = color.white, size = size.tiny, force_overlay = true)
+
+plotshape(dnos > dnos[1] ? high : na, 'Lower Break', shape.labeldown, location.absolute, dnCss, text = 'B', textcolor = color.white, size = size.tiny, force_overlay = true)
+
+//-----------------------------------------------------------------------------}
+//Alerts
+//-----------------------------------------------------------------------------{
+alertcondition(upos > upos[1], 'Upward Breakout', 'Price broke the down-trendline upward')
+alertcondition(dnos > dnos[1], 'Downward Breakout', 'Price broke the up-trendline downward')
+
+//-----------------------------------------------------------------------------}
